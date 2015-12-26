@@ -45,6 +45,7 @@
     <Compile Include="Program.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
     <Compile Include="WindowsSearchSession.cs" />
+    <Compile Include="WinShell.cs" />
   </ItemGroup>
   <ItemGroup>
     <None Include="App.config" />

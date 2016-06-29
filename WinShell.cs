@@ -60,11 +60,10 @@ namespace WinShell
                 try
                 {
                     value = PropVariant.ToObject(pv);
-                    if (value == null) value = "(Null)";
                 }
-                catch
+                catch (Exception err)
                 {
-                    value = "(Unsupported Type)";
+                    throw new ApplicationException("Unsupported property data type", err);
                 }
             }
             finally
@@ -164,6 +163,14 @@ namespace WinShell
             NativeMethods.IPropertyDescription iPropertyDescription;
             m_IPropertySystem.GetPropertyDescriptionByName(canonicalName, ref IID_IPropertyDescription, out iPropertyDescription);
             return new PropertyDescription(iPropertyDescription);
+        }
+
+        public PROPERTYKEY GetPropertyKeyByName(string canonicalName)
+        {
+            using (PropertyDescription pd = GetPropertyDescriptionByName(canonicalName))
+            {
+                return pd.PropertyKey;
+            }
         }
  
         /*
@@ -368,7 +375,7 @@ namespace WinShell
                     value = Marshal.PtrToStringUni(v.dataIntPtr);
                     break;
 
-                case 0x101f:
+                case 0x101f: // VT_VECTOR|VT_LPWSTR
                     {
                         string[] strings = new string[v.cElems];
                         for (int i=0; i<v.cElems; ++i)
@@ -377,6 +384,14 @@ namespace WinShell
                             strings[i] = Marshal.PtrToStringUni(strPtr);
                         }
                         value = strings;
+                    }
+                    break;
+
+                case 0x1005: // VT_Vector|VT_R8
+                    {
+                        double[] doubles = new double[v.cElems];
+                        Marshal.Copy(v.pElems, doubles, 0, (int)v.cElems);
+                        value = doubles;
                     }
                     break;
 

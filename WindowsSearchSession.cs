@@ -84,6 +84,33 @@ namespace FMAutoTagPhotos
             return kwList.ToArray();
         }
 
+        public OleDbDataReader Query(string sql)
+        {
+            // This is a kludge and not very robust but it will work for now.
+            sql = sql.Replace("FROM SystemIndex WHERE", string.Format("FROM {0}SystemIndex WHERE SCOPE='file:{1}' AND", m_hostPrefix, m_pathInUrlForm));
+            Console.WriteLine(sql);
+            using (OleDbCommand cmd = new OleDbCommand(sql, m_dbConnection))
+            {
+                return cmd.ExecuteReader();
+            }
+        }
+
+        public void Dump(OleDbDataReader reader)
+        {
+            int nReads = 0;
+            while (reader.Read())
+            {
+                ++nReads;
+                object[] values = new object[reader.FieldCount];
+                reader.GetValues(values);
+                Console.WriteLine(string.Join(", ", values));
+            }
+            reader.Close();
+            Console.WriteLine("{0} rows read.", nReads);
+            Console.WriteLine();
+        }
+
+
         public void Dispose()
         {
             Dispose(true);

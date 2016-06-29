@@ -4,6 +4,7 @@ using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 using System.IO;
+using Microsoft.Search.Interop;
 
 namespace FMAutoTagPhotos
 {
@@ -11,21 +12,34 @@ namespace FMAutoTagPhotos
     {
         const string c_syntax =
 @"Syntax:
-    FMAutoTagPhotos -l <LibraryPath> [options]
+    FMAutoTagPhotos -lib <LibraryPath> [options]
 Options:
     -h                  Display this help test.
     -lib <LibraryRoot>  Path to the root folder of the photos library.
                         The folder must be included in Windows Search.
     -alltags            List all tags presently in use.
-    -match <Folder>     Folder of photos to match in the library.
+    -match <Path>       Path to a folder or filename of photos to match in
+                        the library. May include wildcards in the filename.
+    -dump <Path>        Path to a folder or filename to photos for which all
+                        metadata will be dumped. May include wildcards.
     -tag <keyword>      Tag to apply to all of the matched photos.
 
 Locates patches for all of the photos in the ""match"" folder and applies
 the specified tag to them. Success or failure to find matches is listed
 as output.
 ";
+// 78 Columns                                                                |
+
+        static readonly char[] s_invalidTagChars = new char[]
+        {
+            '#',
+            '/',
+            '\\'
+        };
+
 
         static bool s_verbose = true;
+        static bool s_test = false;
                         
         static void Main(string[] args)
         {
@@ -33,6 +47,8 @@ as output.
             bool writeAllTags = false;
             string libraryPath = null;
             string matchPath = null;
+            string dumpPath = null;
+            string tag = null;
 
             try
             {
@@ -61,13 +77,24 @@ as output.
                         case "-match":
                             ++nArg;
                             if (nArg >= args.Length) throw new ArgumentException("Command-Line Syntax Error: No value specified for '-match'");
-                            matchPath = Path.GetFullPath(args[nArg]);
-                            if (!Directory.Exists(matchPath))
-                            {
-                                throw new ArgumentException(String.Format("Folder '{0}' does not exist.", matchPath));
-                            }
+                            matchPath = PhotoEnumerable.GetFullPath(args[nArg]);
                             break;
 
+                        case "-dump":
+                            ++nArg;
+                            if (nArg >= args.Length) throw new ArgumentException("Command-Line Syntax Error: No value specified for '-dump'");
+                            dumpPath = PhotoEnumerable.GetFullPath(args[nArg]);
+                            break;
+
+                        case "-tag":
+                            ++nArg;
+                            if (nArg >= args.Length) throw new ArgumentException("Command-Line Syntax Error: No value specified for '-tag'");
+                            tag = args[nArg];
+                            if (tag.IndexOfAny(s_invalidTagChars) >= 0) throw new ArgumentException("Prohibited character in tag.");
+                            break;
+
+                        default:
+                            throw new ArgumentException(string.Format("Unexpected command-line parameter '{0}'", args[nArg]));
                     }
                 }
 
@@ -75,35 +102,55 @@ as output.
                 {
                     // Do nothing here
                 }
-                else
+                else if (s_test)
                 {
-                    if (libraryPath == null) throw new ArgumentException("Library path not specified. Use '-l'");
+                    CSearchManager srchMgr = new CSearchManager();
+                    CSearchCatalogManager srchCatMgr = srchMgr.GetCatalog("SystemIndex");
+                    CSearchQueryHelper queryHelper = srchCatMgr.GetQueryHelper();
+                    Console.WriteLine(queryHelper.GenerateSQLFromUserQuery("cameramodel:\"EZ Controller\" cameramaker:\"NORITSU KOKI\" datetaken:11/20/2013 11:15 AM"));
+                    Console.WriteLine();
 
                     using (WindowsSearchSession session = new WindowsSearchSession(libraryPath))
                     {
+                        // DateTaken seems to have one second resolution, at least in this context. Using a range is safest.
+                        using (var reader = session.Query("SELECT System.ItemUrl, System.Photo.CameraModel, System.Photo.CameraManufacturer, System.Photo.DateTaken FROM SystemIndex WHERE CONTAINS(System.Photo.CameraModel, '\"EZ Controller\"',1033) AND System.Photo.CameraManufacturer = 'NORITSU KOKI' AND System.Photo.DateTaken = '2013/11/20 18:15:06'"))
+                        {
+                            session.Dump(reader);
+                        }
+                    }
 
-                        if (writeAllTags)
+                }
+                else if (writeAllTags)
+                {
+                    using (WindowsSearchSession session = new WindowsSearchSession(libraryPath))
+                    {
+                        Console.Error.WriteLine("All Tags:");
+                        Console.Error.WriteLine();
+                        string[] keywords = session.GetAllKeywords();
+                        foreach (string keyword in keywords)
                         {
-                            Console.Error.WriteLine("All Tags:");
-                            Console.Error.WriteLine();
-                            string[] keywords = session.GetAllKeywords();
-                            foreach (string keyword in keywords)
-                            {
-                                Console.WriteLine(keyword);
-                            }
-                        }
-                        else if (matchPath != null)
-                        {
-                            TagAllMatches(matchPath, session);
-                        }
-                        else
-                        {
-                            throw new ArgumentException("No operation option specified.");
+                            Console.WriteLine(keyword);
                         }
                     }
                 }
+                else if (matchPath != null)
+                {
+                    PhotoTagger tagger = new PhotoTagger(libraryPath);
+                    tagger.Verbose = s_verbose;
+                    //tagger.TagAllMatches(matchPath, tag);
+                }
+                else if (dumpPath != null)
+                {
+                    PhotoTagger tagger = new PhotoTagger(libraryPath);
+                    tagger.Verbose = s_verbose;
+                    tagger.Dump(dumpPath, tag);
+                }
+                else
+                {
+                    throw new ArgumentException("No operation option specified.");
+                }
             }
-            catch(Exception err)
+            catch (Exception err)
             {
                 if (err is ArgumentException) writeSyntax = true;
 #if DEBUG
@@ -122,64 +169,6 @@ as output.
                 Console.Error.Write("Press any key to exit.");
                 Console.ReadKey(true);
             }
-        }
-
-        static void TagAllMatches(string matchFolder, WindowsSearchSession session)
-        {
-            int nJpeg = 0;
-            int nTagged = 0;
-            foreach (string pattern in new string[] { "*.jpg", "*.jpeg"})
-            {
-                foreach (string filename in Directory.GetFiles(matchFolder, pattern))
-                {
-                    ++nJpeg;
-                    if (s_verbose) Console.WriteLine(filename);
-                    DumpProperties(filename);
-                    Console.WriteLine();
-                }
-            }
-        }
-
-        static void DumpProperties(string filename)
-        {
-            using (WinShell.PropertySystem propsys = new WinShell.PropertySystem())
-            {
-                using (WinShell.PropertyStore store = WinShell.PropertyStore.Open(filename))
-                {
-                    int count = store.Count;
-                    for (int i = 0; i < count; ++i)
-                    {
-                        WinShell.PROPERTYKEY key = store.GetAt(i);
-
-                        string name;
-                        try
-                        {
-                            using (WinShell.PropertyDescription desc = propsys.GetPropertyDescription(key))
-                            {
-                                name = string.Concat(desc.CanonicalName, " ", desc.DisplayName);
-                            }
-                        }
-                        catch
-                        {
-                            name = string.Format("({0}:{1})", key.fmtid, key.pid);
-                        }
-
-                        object value = store.GetValue(key);
-                        string strValue;
-
-                        if (value is string[])
-                        {
-                            strValue = string.Join(";", (string[])value);
-                        }
-                        else
-                        {
-                            strValue = value.ToString();
-                        }
-                        Console.WriteLine("{0}: {1}", name, strValue);
-                    }
-                }
-            }
-
         }
 
 

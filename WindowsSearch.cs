@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Text.RegularExpressions;
 using System.Text;
 using System.Threading.Tasks;
 using System.Data;
@@ -7,7 +8,7 @@ using System.Data.OleDb;
 using System.Diagnostics;
 using System.IO;
 
-namespace FMAutoTagPhotos
+namespace WindowsSearch
 {
     class WindowsSearchSession : IDisposable
     {
@@ -19,7 +20,7 @@ namespace FMAutoTagPhotos
         {
             path = Path.GetFullPath(path);
             m_pathInUrlForm = path.Replace('\\', '/');
-            
+
             // Get host prefix (empty string if localhost)
             if (m_pathInUrlForm.StartsWith("//", StringComparison.Ordinal))
             {
@@ -84,32 +85,18 @@ namespace FMAutoTagPhotos
             return kwList.ToArray();
         }
 
+        static readonly Regex sRxSystemIndex = new Regex(@"\sFROM\s+""?SystemIndex""?\s+WHERE\s+", RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
+
         public OleDbDataReader Query(string sql)
         {
-            // This is a kludge and not very robust but it will work for now.
-            sql = sql.Replace("FROM SystemIndex WHERE", string.Format("FROM {0}SystemIndex WHERE SCOPE='file:{1}' AND", m_hostPrefix, m_pathInUrlForm));
-            Console.WriteLine(sql);
+            // Update the scope in the SQL statement
+            sql = sRxSystemIndex.Replace(sql, string.Format(@" FROM {0}SystemIndex WHERE SCOPE='file:{1}' AND ", m_hostPrefix, m_pathInUrlForm));
+            Debug.WriteLine(sql);
             using (OleDbCommand cmd = new OleDbCommand(sql, m_dbConnection))
             {
                 return cmd.ExecuteReader();
             }
         }
-
-        public void Dump(OleDbDataReader reader)
-        {
-            int nReads = 0;
-            while (reader.Read())
-            {
-                ++nReads;
-                object[] values = new object[reader.FieldCount];
-                reader.GetValues(values);
-                Console.WriteLine(string.Join(", ", values));
-            }
-            reader.Close();
-            Console.WriteLine("{0} rows read.", nReads);
-            Console.WriteLine();
-        }
-
 
         public void Dispose()
         {
@@ -135,6 +122,63 @@ namespace FMAutoTagPhotos
                 }
 #endif
             }
+        }
+
+    } // Class WindowsSearchSession
+
+    static class WindowsSearchHelp
+    {
+        public static void WriteColumnNamesToCsv(this OleDbDataReader reader, TextWriter writer)
+        {
+            int fieldCount = reader.FieldCount;
+            for (int i = 0; i < fieldCount; ++i)
+            {
+                if (i > 0) writer.Write(',');
+                writer.Write(reader.GetName(i));
+            }
+            writer.WriteLine();
+        }
+
+        static readonly char[] sCsvSpecialChars = new char[] { ',', '"', '\r', '\n' };
+
+        public static int WriteRowsToCsv(this OleDbDataReader reader, TextWriter writer)
+        {
+            int rowCount = 0;
+            while (reader.Read())
+            {
+                ++rowCount;
+
+                object[] values = new object[reader.FieldCount];
+                reader.GetValues(values);
+
+                for (int i = 0; i < values.Length; ++i)
+                {
+                    string value = values[i].ToString();
+                    if (value == null)
+                    {
+                        // Do nothing
+                    }
+                    else if (value.IndexOfAny(sCsvSpecialChars) >= 0)
+                    {
+                        writer.Write('"');
+                        if (value.IndexOf('"') >= 0)
+                            writer.Write(value.Replace("\"", "\"\""));
+                        else
+                            writer.Write(value);
+                        writer.Write('"');
+                    }
+                    else
+                    {
+                        writer.Write(value);
+                    }
+                    if (i < values.Length - 1)
+                        writer.Write(',');
+                }
+                writer.WriteLine();
+            }
+
+            reader.Close();
+            return rowCount;
         }
 
     }

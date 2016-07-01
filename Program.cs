@@ -4,7 +4,7 @@ using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 using System.IO;
-using Microsoft.Search.Interop;
+using WindowsSearch;
 
 namespace FMAutoTagPhotos
 {
@@ -37,9 +37,7 @@ as output.
             '\\'
         };
 
-
         static bool s_verbose = true;
-        static bool s_test = false;
                         
         static void Main(string[] args)
         {
@@ -66,7 +64,7 @@ as output.
                             libraryPath = Path.GetFullPath(args[nArg]);
                             if (!Directory.Exists(libraryPath))
                             {
-                                throw new ArgumentException(String.Format("Folder '{0}' does not exist.", libraryPath));
+                                throw new ArgumentException(String.Format("Folder '{0}' not found.", libraryPath));
                             }
                             break;
 
@@ -102,24 +100,6 @@ as output.
                 {
                     // Do nothing here
                 }
-                else if (s_test)
-                {
-                    CSearchManager srchMgr = new CSearchManager();
-                    CSearchCatalogManager srchCatMgr = srchMgr.GetCatalog("SystemIndex");
-                    CSearchQueryHelper queryHelper = srchCatMgr.GetQueryHelper();
-                    Console.WriteLine(queryHelper.GenerateSQLFromUserQuery("cameramodel:\"EZ Controller\" cameramaker:\"NORITSU KOKI\" datetaken:11/20/2013 11:15 AM"));
-                    Console.WriteLine();
-
-                    using (WindowsSearchSession session = new WindowsSearchSession(libraryPath))
-                    {
-                        // DateTaken seems to have one second resolution, at least in this context. Using a range is safest.
-                        using (var reader = session.Query("SELECT System.ItemUrl, System.Photo.CameraModel, System.Photo.CameraManufacturer, System.Photo.DateTaken FROM SystemIndex WHERE CONTAINS(System.Photo.CameraModel, '\"EZ Controller\"',1033) AND System.Photo.CameraManufacturer = 'NORITSU KOKI' AND System.Photo.DateTaken = '2013/11/20 18:15:06'"))
-                        {
-                            session.Dump(reader);
-                        }
-                    }
-
-                }
                 else if (writeAllTags)
                 {
                     using (WindowsSearchSession session = new WindowsSearchSession(libraryPath))
@@ -137,7 +117,7 @@ as output.
                 {
                     PhotoTagger tagger = new PhotoTagger(libraryPath);
                     tagger.Verbose = s_verbose;
-                    //tagger.TagAllMatches(matchPath, tag);
+                    tagger.TagAllMatches(matchPath, tag);
                 }
                 else if (dumpPath != null)
                 {

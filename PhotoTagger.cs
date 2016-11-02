@@ -179,7 +179,7 @@ ECHO Restoring backups...
                                 }
                                 else
                                 {
-                                    Console.WriteLine("   '{0}' Fails pixel match.", matchFilename);
+                                    Console.WriteLine("   '{0}' fails pixel match.", matchFilename);
                                 }
                             }
                         }
@@ -200,7 +200,6 @@ ECHO Restoring backups...
 
                             try
                             {
-
                                 // See if the match is already tagged with this keyword
                                 string[] keywords;
                                 using (WinShell.PropertyStore store = WinShell.PropertyStore.Open(matchFilename))
@@ -272,7 +271,26 @@ ECHO Restoring backups...
                                 Console.WriteLine("   " + err.Message);
                                 Console.WriteLine();
                             }
+
+
                         } // foreach match
+
+                        // If specified, delete the original
+                        if (delsrc && nTagged > 0)
+                        {
+                            Console.WriteLine("Deleting '{0}'.", filename);
+                            try
+                            {
+                                File.Delete(filename);
+                            }
+                            catch (Exception err)
+                            {
+                                Console.WriteLine("Failed to delete:");
+                                Console.WriteLine("   " + err.Message);
+                                Console.WriteLine();
+                            }
+
+                        }
 
                         Console.WriteLine("{0} matches.", matches.Count);
                         Console.WriteLine("{0} tagged.", nTagged);

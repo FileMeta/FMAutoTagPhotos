@@ -49,6 +49,11 @@ namespace WinShell
             return key;
         }
 
+        /// <summary>
+        /// Gets the value of the specified property.
+        /// </summary>
+        /// <param name="key">A property key. Use PropertySystem.GetPropertyKeyByName to obtain property keys.</param>
+        /// <returns>The value of the specified property or null if the item does not have the property.</returns>
         public object GetValue(PROPERTYKEY key)
         {
             IntPtr pv = IntPtr.Zero;
@@ -328,6 +333,18 @@ namespace WinShell
     [StructLayout (LayoutKind.Sequential, Pack = 4)]
     public struct PROPERTYKEY
     {
+        public PROPERTYKEY(Guid guid, UInt32 propertyId)
+        {
+            fmtid = guid;
+            pid = propertyId;
+        }
+
+        public PROPERTYKEY(string guid, UInt32 propertyId)
+        {
+            fmtid = new Guid(guid);
+            pid = propertyId;
+        }
+
         public Guid fmtid;
         public UInt32 pid;
     }

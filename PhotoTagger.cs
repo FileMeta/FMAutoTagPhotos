@@ -5,11 +5,50 @@ using System.Threading.Tasks;
 using System.IO;
 using System.Collections;
 using WindowsSearch;
+using System.Diagnostics;
+using System.Data.OleDb;
+using System.Globalization;
 
 namespace FMAutoTagPhotos
 {
     class PhotoTagger
     {
+        const string c_BackupRevertBatName = "Revert.bat";
+        const string c_BackupRevertHeader =
+@"@ECHO OFF
+ECHO This batch will undo FMAutoTagPhotos by replacing previously tagged
+photos with backups.
+ECHO.
+ECHO lib:   {0}
+ECHO match: {1}
+ECHO tag:   {2}
+ECHO.
+CHOICE /C YN /M ""Proceed to revert changes?""
+IF %ERRORLEVEL% == 1 GOTO PROCEED
+:CANCEL
+ECHO Canceled
+GOTO FINISH
+:PROCEED
+ECHO.
+ECHO Restoring backups...
+@ECHO ON
+";
+
+        const string c_BackupRevertFooter =
+@"@ECHO Revert complete.
+:FINISH
+@PAUSE
+";
+
+        // Property Keys
+        // From: https://msdn.microsoft.com/en-us/library/windows/desktop/dd561977(v=vs.85).aspx
+        static WinShell.PROPERTYKEY s_pkFilename = new WinShell.PROPERTYKEY("41CF5AE0-F75A-4806-BD87-59C7D9248EB9", 100); // System.FileName
+        static WinShell.PROPERTYKEY s_pkHorizontalSize = new WinShell.PROPERTYKEY("6444048F-4C8B-11D1-8B70-080036B11A03", 3); // System.Image.HorizontalSize
+        static WinShell.PROPERTYKEY s_pkVerticalSize = new WinShell.PROPERTYKEY("6444048F-4C8B-11D1-8B70-080036B11A03", 4); // System.Image.VerticalSize
+        static WinShell.PROPERTYKEY s_pkCameraModel = new WinShell.PROPERTYKEY("14B81DA1-0135-4D31-96D9-6CBFC9671A99", 272); // System.Photo.CameraModel
+        static WinShell.PROPERTYKEY s_pkDateTaken = new WinShell.PROPERTYKEY("14B81DA1-0135-4D31-96D9-6CBFC9671A99", 36867); // System.Photo.DateTaken
+        static WinShell.PROPERTYKEY s_pkKeywords = new WinShell.PROPERTYKEY("F29F85E0-4FF9-1068-AB91-08002B27B3D9", 5); // System.Keywords
+
         string m_libraryPath;
 
         public PhotoTagger(string libraryPath)
@@ -18,34 +57,36 @@ namespace FMAutoTagPhotos
         }
 
         public bool Verbose { get; set; }
+        public bool Simulate { get; set; }
 
-        public void TagAllMatches(string path, string tag)
+        public void TagAllMatches(string path, string tag, bool delsrc, string backupPath)
         {
             int nJpeg = 0;
-            int nTagged = 0;
+            int nJpegsMatched = 0;
 
-            // Open the Windows Search system
-            using (WindowsSearchSession winSrchSession = new WindowsSearchSession(m_libraryPath))
+            TextWriter backupBatch = null;
+            try
             {
-                // Open the property system
-                using (WinShell.PropertySystem propsys = new WinShell.PropertySystem())
+                if (Simulate)
                 {
-                    // Get the property keys
-                    WinShell.PROPERTYKEY pkFilename = propsys.GetPropertyKeyByName("System.FileName");
-                    WinShell.PROPERTYKEY pkHorizontalSize = propsys.GetPropertyKeyByName("System.Image.HorizontalSize");
-                    WinShell.PROPERTYKEY pkVerticalSize = propsys.GetPropertyKeyByName("System.Image.VerticalSize");
-                    WinShell.PROPERTYKEY pkCameraModel = propsys.GetPropertyKeyByName("System.Photo.CameraModel");
-                    WinShell.PROPERTYKEY pkDateTaken = propsys.GetPropertyKeyByName("System.Photo.DateTaken");
+                    Console.WriteLine("Simulating Operations.");
+                }
 
+                if (!string.IsNullOrEmpty(backupPath))
+                {
+                    backupBatch = new StreamWriter(Path.Combine(backupPath, c_BackupRevertBatName), false);
+                    backupBatch.WriteLine(c_BackupRevertHeader, m_libraryPath, path, tag);
+                }
+
+                // Open the Windows Search system
+                using (WindowsSearchSession winSrchSession = new WindowsSearchSession(m_libraryPath))
+                {
                     // Process each matching file
                     foreach (string filename in new PhotoEnumerable(path))
                     {
                         ++nJpeg;
-                        if (Verbose)
-                        {
-                            Console.WriteLine();
-                            Console.WriteLine(filename);
-                        }
+                        Console.WriteLine();
+                        Console.WriteLine(filename);
 
                         // Open the property store for this file and retrieve the key properties
                         string propFilename = null;
@@ -55,12 +96,15 @@ namespace FMAutoTagPhotos
                         DateTime? propDateTaken = null;
                         using (WinShell.PropertyStore store = WinShell.PropertyStore.Open(filename))
                         {
-                            propFilename = store.GetValue(pkFilename) as string;
-                            propVerticalSize = store.GetValue(pkVerticalSize) as UInt32?;
-                            propHorizontalSize = store.GetValue(pkHorizontalSize) as UInt32?;
-                            propCameraModel = store.GetValue(pkCameraModel) as string;
-                            propDateTaken = store.GetValue(pkDateTaken) as DateTime?;
+                            propFilename = store.GetValue(s_pkFilename) as string;
+                            propVerticalSize = store.GetValue(s_pkVerticalSize) as UInt32?;
+                            propHorizontalSize = store.GetValue(s_pkHorizontalSize) as UInt32?;
+                            propCameraModel = store.GetValue(s_pkCameraModel) as string;
+                            propDateTaken = store.GetValue(s_pkDateTaken) as DateTime?;
                         }
+
+                        // Get the pixel sample
+                        byte[] pixelSample = GetPixelSample(filename);
 
                         if (Verbose)
                         {
@@ -77,34 +121,180 @@ namespace FMAutoTagPhotos
                             continue;
                         }
 
-                        int matches = 0;
+                        var matches = new List<string>();
 
-                        // Attempt to find using camera model and date taken
-                        if (propCameraModel != null && propDateTaken != null)
+                        // Manage lifetime of dataReader
+                        OleDbDataReader dataReader = null;
+                        try
                         {
-                            /* Windows Search expects all times in Universal Time. This applies to Date Taken
-                             * even tough it is stored in local time and does not include timezone info. Presumably,
-                             * Windows Search converts back to local time using whatever timezone is current on the
-                             * local machine. This might create a problem if the local computer and the computer being
-                             * queried are not set to the same timezone.
-                             */
-                            string sql = string.Format(System.Globalization.CultureInfo.InvariantCulture,
-                                "SELECT System.ItemPathDisplay FROM SystemIndex WHERE System.ContentType = 'image/jpeg' AND System.Photo.CameraModel='{0}' AND System.Photo.DateTaken = '{1}' AND System.Image.HorizontalSize = {2} AND System.Image.VerticalSize = {3}",
-                                propCameraModel, propDateTaken.Value.ToUniversalTime().ToString("yyyy-MM-dd HH:mm:ss",System.Globalization.CultureInfo.InvariantCulture),
-                                propHorizontalSize, propVerticalSize);
-                            Console.WriteLine(sql);
-
-                            using (var reader = winSrchSession.Query(sql))
+                            // Attempt to find using camera model and date taken
+                            if (propCameraModel != null && propDateTaken != null)
                             {
-                                matches += reader.WriteRowsToCsv(Console.Out);
+                                /* Windows Search expects all times in Universal Time. This applies to Date Taken
+                                 * even tough it is stored in local time and does not include timezone info. Presumably,
+                                 * Windows Search converts back to local time using whatever timezone is current on the
+                                 * local machine. This might create a problem if the local computer and the computer being
+                                 * queried are not set to the same timezone.
+                                 * Ways to compensate would be to figure out the timezone of the other computer or to specify
+                                 * a time range. So far, however, this is working.
+                                 */
+                                string sql = string.Format(CultureInfo.InvariantCulture,
+                                    "SELECT System.ItemPathDisplay FROM SystemIndex WHERE System.ContentType = 'image/jpeg' AND System.Photo.CameraModel = '{0}' AND System.Photo.DateTaken = '{1}' AND System.Image.HorizontalSize = {2} AND System.Image.VerticalSize = {3}",
+                                    SqlEncode(propCameraModel), propDateTaken.Value.ToUniversalTime().ToString("yyyy-MM-dd HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture),
+                                    propHorizontalSize, propVerticalSize);
+
+                                dataReader = winSrchSession.Query(sql);
+                                if (!dataReader.HasRows)
+                                {
+                                    dataReader.Close();
+                                    dataReader = null;
+                                }
+                            }
+
+                            // If no matches, attempt to find based on filename and dimensions
+                            if (dataReader != null && dataReader.HasRows)
+                            {
+                                Console.WriteLine("Matching by metadata.");
+                            }
+                            else
+                            {
+                                string sql = string.Format(CultureInfo.InvariantCulture,
+                                    "SELECT System.ItemPathDisplay FROM SystemIndex WHERE System.ContentType = 'image/jpeg' AND System.FileName LIKE '{0}' AND System.Image.HorizontalSize = {1} AND System.Image.VerticalSize = {2}",
+                                    SqlEncode(propFilename), propHorizontalSize, propVerticalSize);
+
+                                dataReader = winSrchSession.Query(sql);
+                                if (dataReader != null && dataReader.HasRows)
+                                {
+                                    Console.WriteLine("Matching by filename.");
+                                }
+                            }
+
+                            while (dataReader.Read())
+                            {
+                                string matchFilename = dataReader.GetString(0);
+                                byte[] matchSample = GetPixelSample(matchFilename);
+                                if (EqualsPixelSample(pixelSample, matchSample))
+                                {
+                                    matches.Add(matchFilename);
+                                }
+                                else
+                                {
+                                    Console.WriteLine("   '{0}' Fails pixel match.", matchFilename);
+                                }
+                            }
+                        }
+                        finally
+                        {
+                            if (dataReader != null)
+                            {
+                                dataReader.Close();
+                                dataReader = null;
                             }
                         }
 
-                        if (Verbose) Console.WriteLine("{0} matches.", matches);
+                        // Process the matches
+                        int nTagged = 0;
+                        foreach (string matchFilename in matches)
+                        {
+                            Console.WriteLine("Match: " + matchFilename);
+
+                            try
+                            {
+
+                                // See if the match is already tagged with this keyword
+                                string[] keywords;
+                                using (WinShell.PropertyStore store = WinShell.PropertyStore.Open(matchFilename))
+                                {
+                                    keywords = store.GetValue(s_pkKeywords) as string[];
+                                }
+                                if (keywords == null)
+                                {
+                                    keywords = new string[0];
+                                }
+                                else
+                                {
+                                    bool alreadyTagged = false;
+                                    foreach (string keyword in keywords)
+                                    {
+                                        if (keyword.Equals(tag, StringComparison.OrdinalIgnoreCase))
+                                        {
+                                            alreadyTagged = true;
+                                            break;
+                                        }
+                                    }
+                                    if (alreadyTagged)
+                                    {
+                                        Console.WriteLine("   Already tagged with keyword '{0}'", tag);
+                                        continue;
+                                    }
+                                }
+
+                                // Simulate setting the tag
+                                if (Simulate)
+                                {
+                                    if (backupBatch != null)
+                                    {
+                                        string backupFilename = Path.Combine(backupPath, string.Format(CultureInfo.InvariantCulture, "({0:D3}) {1}", nTagged, Path.GetFileName(matchFilename)));
+                                        Console.WriteLine("   (Simulate on) Would be backed up to '{0}'.", backupFilename);
+                                        backupBatch.WriteLine("REM MOVE /Y \"{0}\" \"{1}\"", backupFilename, matchFilename);
+                                    }
+                                    Console.WriteLine("   (Simulate on) Would be tagged with keyword '{0}'", tag);
+                                    ++nTagged;
+                                }
+
+                                // Actually set the tag
+                                else
+                                {
+                                    if (backupBatch != null)
+                                    {
+                                        string backupFilename = Path.Combine(backupPath, string.Format(CultureInfo.InvariantCulture, "({0:D3}) {1}", nTagged, Path.GetFileName(matchFilename)));
+                                        Console.WriteLine("   Backing up to '{0}'.", backupFilename);
+                                        File.Copy(matchFilename, backupFilename);
+                                        backupBatch.WriteLine("MOVE /Y \"{0}\" \"{1}\"", backupFilename, matchFilename);
+                                    }
+
+                                    Console.WriteLine("   Tagging with keyword '{0}'.", tag);
+                                    using (WinShell.PropertyStore store = WinShell.PropertyStore.Open(matchFilename, true))
+                                    {
+                                        var keywordList = new List<string>(keywords);
+                                        keywordList.Add(tag);
+                                        keywords = keywordList.ToArray();
+                                        store.SetValue(s_pkKeywords, keywords);
+                                        store.Commit();
+                                    }
+
+                                    ++nTagged;
+                                }
+                            }
+                            catch (Exception err)
+                            {
+                                Console.WriteLine("Failed to tag match:");
+                                Console.WriteLine("   " + err.Message);
+                                Console.WriteLine();
+                            }
+                        } // foreach match
+
+                        Console.WriteLine("{0} matches.", matches.Count);
+                        Console.WriteLine("{0} tagged.", nTagged);
+
+                        if (nTagged != 0) ++nJpegsMatched;
                     } // foreach Jpeg
 
-                } // using PropSys
-            } // using WindowsSearchSession
+                } // using WindowsSearchSession
+            }
+            finally
+            {
+                if (backupBatch != null)
+                {
+                    backupBatch.Write(c_BackupRevertFooter);
+                    backupBatch.Dispose();
+                    backupBatch = null;
+                }
+            }
+
+            Console.WriteLine();
+            Console.WriteLine("{0} JPEG Photos Found.", nJpeg);
+            Console.WriteLine("{0} Matched and tagged.", nJpegsMatched);
         }
 
         /*
@@ -124,7 +314,6 @@ namespace FMAutoTagPhotos
         public void Dump(string path, string tag)
         {
             int nJpeg = 0;
-            int nTagged = 0;
 
             foreach (string filename in new PhotoEnumerable(path))
             {
@@ -196,7 +385,85 @@ namespace FMAutoTagPhotos
             {
                 Console.WriteLine("{0}{1}: {2}", indentStr, pair.Key, pair.Value);
             }
+        }
 
+        // Take 128 samples in the form of 16 rows by 8 samples, each sample being 4 pixels wide
+        // pixels are three bytes long in rgb form so each sample is 12 bytes and the total pixel
+        // sample set is 16 x 8 x 4 x 3 or 1,536 bytes. We prefix the sample with the original
+        // bitmap width and height each as a 32-bit integer. This makes the whole sample 1,542 bytes
+        // long.
+        const int c_pixelSampleColumns = 8;
+        const int c_pixelSampleRows = 16;
+        const int c_pixelSamplePixels = 4;  // Keeps things on a 32-bit boundary which is handy
+        const int c_bytesPerPixel = 3;
+        const int c_pixelPrefixSize = sizeof(int) * 2;  // Height and width prefix
+        const int c_sampleSize = c_bytesPerPixel * c_pixelSamplePixels;
+        const int c_totalSampleSize = c_pixelPrefixSize + (c_sampleSize * c_pixelSampleRows * c_pixelSampleColumns);
+
+        /// <summary>
+        /// Return a sample of pixels from a JPEG that can be compared with other samples
+        /// with a very low probability that matching samples don't represent matching images.
+        /// </summary>
+        /// <param name="jpegFilename"></param>
+        /// <returns>A byte string that may be compared with other bitmap samples.</returns>
+        static byte[] GetPixelSample(string jpegFilename)
+        {
+            // Open the JPEG
+            using (var jpegStream = new FileStream(jpegFilename, FileMode.Open, FileAccess.Read))
+            {
+                // Decode the jpeg and get the bitmap
+                var jpegDecoder = new System.Windows.Media.Imaging.JpegBitmapDecoder(jpegStream, System.Windows.Media.Imaging.BitmapCreateOptions.PreservePixelFormat, System.Windows.Media.Imaging.BitmapCacheOption.OnLoad);
+                System.Windows.Media.Imaging.BitmapFrame bitmap = jpegDecoder.Frames[0];
+
+                if (bitmap.PixelWidth < 4) throw new InvalidDataException("Image is too narrow to match.");
+
+                byte[] pixels = new byte[c_totalSampleSize];
+
+                // Copy in the width and height
+                {
+                    int[] wh = new int[2];
+                    wh[0] = bitmap.PixelWidth;
+                    wh[1] = bitmap.PixelHeight;
+                    Buffer.BlockCopy(wh, 0, pixels, 0, 8);
+                }
+
+                // This will take us close to the right and bottom edges within the limits of integer rounding
+                int xInterval = ((bitmap.PixelWidth / c_pixelSamplePixels - 1) / (c_pixelSampleColumns - 1)) * c_pixelSamplePixels;
+                int yInterval = (bitmap.PixelHeight - 1) / (c_pixelSampleRows - 1);
+                for (int row = 0; row<c_pixelSampleRows; ++row)
+                {
+                    for (int col = 0; col<c_pixelSampleColumns; ++col)
+                    {
+                        var rect = new System.Windows.Int32Rect(col * xInterval, row * yInterval, c_pixelSamplePixels, 1);
+                        int offset = c_pixelPrefixSize + ((row * c_pixelSampleColumns) + col) * c_sampleSize;
+                        bitmap.CopyPixels(rect, pixels, c_sampleSize, offset);
+                    }
+                }
+
+                return pixels;
+            }
+        }
+
+        static void DumpPixelSample(byte[] pixels)
+        {
+            for (int i = 0; i < c_totalSampleSize; ++i) Console.Write(pixels[i].ToString("x2"));
+            Console.WriteLine();
+        }
+
+        static bool EqualsPixelSample(byte[] pixels1, byte[] pixels2)
+        {
+            int len = pixels1.Length;
+            if (len != pixels2.Length) return false;
+            for (int i=0; i<len; ++i)
+            {
+                if (pixels1[i] != pixels2[i]) return false;
+            }
+            return true;
+        }
+
+        static string SqlEncode(string value)
+        {
+            return value.Replace("'", "''");
         }
 
     } // Class PhotoTagger
@@ -348,51 +615,3 @@ namespace FMAutoTagPhotos
 
 }
 
-/* Potential Fields on which to match.
-Field presence count out of 19 sample .jpegs from a variety of cameras and scanners
-
-    19: System.ContentType (Content type)
-    19: System.FileName (Filename)
-    19: System.Image.BitDepth (Bit depth)
-    19: System.Image.Dimensions (Dimensions)
-    19: System.Image.HorizontalResolution (Horizontal resolution)
-    19: System.Image.HorizontalSize (Width)
-    19: System.Image.VerticalResolution (Vertical resolution)
-    19: System.Image.VerticalSize (Height)
-    19: System.Kind (Kind)
-    17: System.Image.ColorSpace (Color representation)
-    17: System.Photo.CameraManufacturer (Camera maker)
-    17: System.Photo.CameraModel (Camera model)
-    17: System.Photo.EXIFVersion (EXIF version)
-    16: System.Image.ResolutionUnit (Resolution unit)
-    15: System.Photo.DateTaken (Date taken)
-    15: System.Photo.Orientation (Orientation)
-    14: System.Photo.ExposureTime (Exposure time)
-    14: System.Photo.Flash (Flash mode)
-    14: System.Photo.FNumber (F-stop)
-    14: System.Photo.MeteringMode (Metering mode)
-    12: System.Photo.ExposureBias (Exposure bias)
-    11: System.Photo.Aperture (Aperture)
-    11: System.Photo.ShutterSpeed (Shutter speed)
-    11: System.Photo.WhiteBalance (White balance)
-    10: System.ApplicationName (Program name)
-    10: System.Photo.FocalLength (Focal length)
-    10: System.Photo.ISOSpeed (ISO speed)
-     9: System.Photo.DigitalZoom (Digital zoom)
-     7: System.Photo.LightSource (Light source)
-     7: System.Photo.MaxAperture (Max aperture)
-     6: System.Image.CompressedBitsPerPixel (Compressed bits/pixel)
-     3: System.GPS.Altitude (Altitude)
-     3: System.GPS.Latitude (Latitude)
-     3: System.GPS.Longitude (Longitude)
-     3: System.Photo.ExposureProgram (Exposure program)
-     3: System.Photo.FocalLengthInFilm (35mm focal length)
-     3: System.Photo.ProgramMode (Program mode)
-     3: System.Photo.Sharpness (Sharpness)
-     2: System.Photo.Contrast (Contrast)
-     2: System.Photo.Saturation (Saturation)
-     1: System.Copyright (Copyright)
-     1: System.Image.ImageID (Image ID)
-     1: System.Photo.Brightness (Brightness)
-     1: System.Photo.SubjectDistance (Subject distance)
-*/

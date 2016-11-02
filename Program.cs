@@ -11,22 +11,42 @@ namespace FMAutoTagPhotos
     class Program
     {
         const string c_syntax =
+// 78 Columns                                                                |
 @"Syntax:
-    FMAutoTagPhotos -lib <LibraryPath> [options]
-Options:
-    -h                  Display this help test.
+To add a keyword tag to all photos in a library that match a photo or
+collection of photos.
+    FMAutoTagPhotos -lib <LibraryRoot> -match <Path> -tag <Keyword> [-backup <Folder>]
+
+To list all keyword tags used in the library.
+    FMAutoTagPhotos -lib <LibraryRoot> -alltags
+
+To dump the raw Windows Property System metadata for a set of files/photos
+    FMAutoTagPhotos -dump <Path>
+
+Arguments:
+    -h                  Display this help text.
     -lib <LibraryRoot>  Path to the root folder of the photos library.
                         The folder must be included in Windows Search.
+    -match <Path>       Path to filenames of photos to match in
+                        the library. Usually includes wildcards in the
+                        filename.
+    -tag <Keyword>      Tag to apply to all of the matched photos.
+    -delsrc             Delete the source file once a match is found and
+                        tagged.
+    -backup <Folder>    Path to a folder that will be loaded with originals
+                        of each photo that is tagged and with a ""revert.bat""
+                        file that will revert all photos back to their
+                        pre-autotag state. Folder should be empty. It will be
+                        created if it doesn't already exist.
+    -simulate           Simulate the tagging operation but don't actually
+                        perform it.
     -alltags            List all tags presently in use.
-    -match <Path>       Path to a folder or filename of photos to match in
-                        the library. May include wildcards in the filename.
     -dump <Path>        Path to a folder or filename to photos for which all
                         metadata will be dumped. May include wildcards.
-    -tag <keyword>      Tag to apply to all of the matched photos.
 
-Locates patches for all of the photos in the ""match"" folder and applies
-the specified tag to them. Success or failure to find matches is listed
-as output.
+Photos are located by their metadata (date taken, camera model, etc.) and by
+filename then matches are verified by comparing pixels from the images.
+The filenames need not match unless metadata is not present.
 ";
 // 78 Columns                                                                |
 
@@ -37,7 +57,7 @@ as output.
             '\\'
         };
 
-        static bool s_verbose = true;
+        static bool s_verbose = false;
                         
         static void Main(string[] args)
         {
@@ -47,6 +67,9 @@ as output.
             string matchPath = null;
             string dumpPath = null;
             string tag = null;
+            bool delsrc = false;
+            string backupPath = null;
+            bool simulate = false;
 
             try
             {
@@ -54,6 +77,7 @@ as output.
                 {
                     switch (args[nArg].ToLower())
                     {
+                        case "-?":
                         case "-h":
                             writeSyntax = true;
                             break;
@@ -78,12 +102,6 @@ as output.
                             matchPath = PhotoEnumerable.GetFullPath(args[nArg]);
                             break;
 
-                        case "-dump":
-                            ++nArg;
-                            if (nArg >= args.Length) throw new ArgumentException("Command-Line Syntax Error: No value specified for '-dump'");
-                            dumpPath = PhotoEnumerable.GetFullPath(args[nArg]);
-                            break;
-
                         case "-tag":
                             ++nArg;
                             if (nArg >= args.Length) throw new ArgumentException("Command-Line Syntax Error: No value specified for '-tag'");
@@ -91,9 +109,42 @@ as output.
                             if (tag.IndexOfAny(s_invalidTagChars) >= 0) throw new ArgumentException("Prohibited character in tag.");
                             break;
 
+                        case "-delsrc":
+                            delsrc = true;
+                            break;
+
+                        case "-backup":
+                            ++nArg;
+                            if (nArg >= args.Length) throw new ArgumentException("Command-Line Syntax Error: No value specified for '-backup'");
+                            backupPath = PhotoEnumerable.GetFullPath(args[nArg]);
+                            break;
+
+                        case "-dump":
+                            ++nArg;
+                            if (nArg >= args.Length) throw new ArgumentException("Command-Line Syntax Error: No value specified for '-dump'");
+                            dumpPath = PhotoEnumerable.GetFullPath(args[nArg]);
+                            break;
+
+                        case "-simulate":
+                            simulate = true;
+                            break;
+
+                        case "-verbose":
+                            s_verbose = true;
+                            break;
+
                         default:
                             throw new ArgumentException(string.Format("Unexpected command-line parameter '{0}'", args[nArg]));
                     }
+                }
+
+                // Make sure only one command was specified
+                {
+                    int nCommands = 0;
+                    if (writeAllTags) ++nCommands;
+                    if (matchPath != null) ++nCommands;
+                    if (dumpPath != null) ++nCommands;
+                    if (nCommands != 1) throw new ArgumentException(string.Format("Must specify one and only one command: alltags, match, or dump."));
                 }
 
                 if (writeSyntax)
@@ -115,9 +166,23 @@ as output.
                 }
                 else if (matchPath != null)
                 {
+                    // If a backup folder was specified. Create it if necessary. Make sure it is empty.
+                    if (backupPath != null)
+                    {
+                        if (!Directory.Exists(backupPath))
+                        {
+                            Directory.CreateDirectory(backupPath);
+                        }
+                        else if (Directory.GetFileSystemEntries(backupPath).Length != 0)
+                        {
+                            throw new ArgumentException(string.Format("Backup folder '{0}' must be empty.", backupPath));
+                        }
+                    }
+
                     PhotoTagger tagger = new PhotoTagger(libraryPath);
                     tagger.Verbose = s_verbose;
-                    tagger.TagAllMatches(matchPath, tag);
+                    tagger.Simulate = simulate;
+                    tagger.TagAllMatches(matchPath, tag, delsrc, backupPath);
                 }
                 else if (dumpPath != null)
                 {
@@ -132,13 +197,13 @@ as output.
             }
             catch (Exception err)
             {
-                if (err is ArgumentException) writeSyntax = true;
 #if DEBUG
                 Console.Error.WriteLine(err.ToString());
 #else
                 Console.Error.WriteLine(err.Message);
 #endif
                 Console.Error.WriteLine();
+                if (err is ArgumentException) Console.Error.Write("For syntax: FMAutoTagPhotos -h");
             }
 
             if (writeSyntax) Console.Error.Write(c_syntax);

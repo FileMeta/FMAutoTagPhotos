@@ -42,12 +42,12 @@ ECHO Restoring backups...
 
         // Property Keys
         // From: https://msdn.microsoft.com/en-us/library/windows/desktop/dd561977(v=vs.85).aspx
-        static WinShell.PROPERTYKEY s_pkFilename = new WinShell.PROPERTYKEY("41CF5AE0-F75A-4806-BD87-59C7D9248EB9", 100); // System.FileName
-        static WinShell.PROPERTYKEY s_pkHorizontalSize = new WinShell.PROPERTYKEY("6444048F-4C8B-11D1-8B70-080036B11A03", 3); // System.Image.HorizontalSize
-        static WinShell.PROPERTYKEY s_pkVerticalSize = new WinShell.PROPERTYKEY("6444048F-4C8B-11D1-8B70-080036B11A03", 4); // System.Image.VerticalSize
-        static WinShell.PROPERTYKEY s_pkCameraModel = new WinShell.PROPERTYKEY("14B81DA1-0135-4D31-96D9-6CBFC9671A99", 272); // System.Photo.CameraModel
-        static WinShell.PROPERTYKEY s_pkDateTaken = new WinShell.PROPERTYKEY("14B81DA1-0135-4D31-96D9-6CBFC9671A99", 36867); // System.Photo.DateTaken
-        static WinShell.PROPERTYKEY s_pkKeywords = new WinShell.PROPERTYKEY("F29F85E0-4FF9-1068-AB91-08002B27B3D9", 5); // System.Keywords
+        static Interop.PropertyKey s_pkFilename = new Interop.PropertyKey("41CF5AE0-F75A-4806-BD87-59C7D9248EB9", 100); // System.FileName
+        static Interop.PropertyKey s_pkHorizontalSize = new Interop.PropertyKey("6444048F-4C8B-11D1-8B70-080036B11A03", 3); // System.Image.HorizontalSize
+        static Interop.PropertyKey s_pkVerticalSize = new Interop.PropertyKey("6444048F-4C8B-11D1-8B70-080036B11A03", 4); // System.Image.VerticalSize
+        static Interop.PropertyKey s_pkCameraModel = new Interop.PropertyKey("14B81DA1-0135-4D31-96D9-6CBFC9671A99", 272); // System.Photo.CameraModel
+        static Interop.PropertyKey s_pkDateTaken = new Interop.PropertyKey("14B81DA1-0135-4D31-96D9-6CBFC9671A99", 36867); // System.Photo.DateTaken
+        static Interop.PropertyKey s_pkKeywords = new Interop.PropertyKey("F29F85E0-4FF9-1068-AB91-08002B27B3D9", 5); // System.Keywords
 
         string m_libraryPath;
 
@@ -355,19 +355,17 @@ ECHO Restoring backups...
                     int count = store.Count;
                     for (int i = 0; i < count; ++i)
                     {
-                        WinShell.PROPERTYKEY key = store.GetAt(i);
+                        Interop.PropertyKey key = store.GetAt(i);
 
                         string name;
                         try
                         {
-                            using (WinShell.PropertyDescription desc = propsys.GetPropertyDescription(key))
-                            {
-                                name = string.Concat(desc.CanonicalName, " (", desc.DisplayName, ")");
-                            }
+                            var desc = propsys.GetPropertyDescription(key);
+                            name = string.Concat(desc.CanonicalName, " (", desc.DisplayName, ")");
                         }
                         catch
                         {
-                            name = string.Concat("{", key.fmtid.ToString(), "}");
+                            name = key.ToString();
                         }
 
                         object value = store.GetValue(key);

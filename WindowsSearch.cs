@@ -56,6 +56,8 @@ namespace WindowsSearch
 
             using (OleDbCommand cmd = new OleDbCommand(query, m_dbConnection))
             {
+                cmd.CommandTimeout = 600;
+
                 using (OleDbDataReader rdr = cmd.ExecuteReader())
                 {
                     while (rdr.Read())
